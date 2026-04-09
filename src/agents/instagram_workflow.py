@@ -1,72 +1,77 @@
 import logging
-from typing import Optional
-
-try:
-    from agno import Workflow, Agent
-    AGNO_AVAILABLE = True
-except ImportError:
-    AGNO_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
 
-class InstagramWorkflow:
-    def __init__(
-        self,
-        image_editor_agent,
-        caption_agent,
-        drive_client,
-        telegram_notifier,
-        image_tracker
-    ):
-        self.image_editor = image_editor_agent
-        self.caption_agent = caption_agent
-        self.drive_client = drive_client
-        self.telegram = telegram_notifier
-        self.tracker = image_tracker
+class ImageProcessingError(Exception):
+    """Error durante el procesamiento de una imagen."""
+    pass
 
-    def process_new_images(self) -> int:
-        processed_count = 0
+
+def process_single_image(
+    file: dict,
+    drive_client,
+    image_editor,
+    caption_agent,
+    telegram_notifier,
+    image_tracker
+) -> bool:
+    """
+    Procesa una sola imagen.
+    
+    Returns:
+        True si se procesó correctamente, False si hubo error.
+    """
+    file_id = file['id']
+    file_name = file['name']
+    
+    logger.info(f"Processing image: {file_name}")
+    
+    try:
+        image_content = drive_client.download_image(file_id)
         
-        input_folder = self.drive_client.list_images(
-            self.drive_client.input_folder_id
+        edited_image = image_editor.edit_image(image_content)
+        
+        caption = caption_agent.generate_caption(edited_image)
+        
+        output_file_name = f"processed_{file_name}"
+        drive_client.upload_image(
+            drive_client.output_folder_id,
+            output_file_name,
+            edited_image
         )
         
-        for file in input_folder:
-            file_id = file['id']
-            file_name = file['name']
-            
-            if self.tracker.is_processed(file_id):
-                logger.info(f"Skipping already processed image: {file_name}")
-                continue
-            
-            logger.info(f"Processing new image: {file_name}")
-            
-            try:
-                image_content = self.drive_client.download_image(file_id)
-                
-                edited_image = self.image_editor.edit_image(image_content)
-                
-                caption = self.caption_agent.generate_caption(edited_image)
-                
-                output_file_name = f"processed_{file_name}"
-                self.drive_client.upload_image(
-                    self.drive_client.output_folder_id,
-                    output_file_name,
-                    edited_image
-                )
-                
-                self.telegram.send_image_with_caption(edited_image, caption)
-                
-                self.tracker.mark_processed(file_id)
-                
-                processed_count += 1
-                logger.info(f"Successfully processed image: {file_name}")
-                
-            except Exception as e:
-                logger.error(f"Error processing image {file_name}: {e}")
-                self.telegram.send_error_notification(
-                    f"Error processing {file_name}: {str(e)}"
-                )
+        telegram_notifier.send_image_with_caption(edited_image, caption)
         
-        return processed_count
+        image_tracker.mark_processed(file_id)
+        
+        logger.info(f"Successfully processed image: {file_name}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error processing image {file_name}: {e}")
+        telegram_notifier.send_error_notification(
+            f"Error processing {file_name}: {str(e)}"
+        )
+        return False
+
+
+def get_pending_images(drive_client, image_tracker) -> list[dict]:
+    """
+    Obtiene las imágenes nuevas que aún no han sido procesadas.
+    """
+    all_images = drive_client.list_images(drive_client.input_folder_id)
+    
+    pending = []
+    for image in all_images:
+        if not image_tracker.is_processed(image['id']):
+            pending.append(image)
+        else:
+            logger.debug(f"Skipping already processed: {image['name']}")
+    
+    return pending
+
+
+def get_processed_count(pending_images: list[dict]) -> int:
+    """Retorna el número de imágenes procesadas."""
+    return len(pending_images)
